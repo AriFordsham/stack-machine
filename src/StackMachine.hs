@@ -5,41 +5,33 @@
 module StackMachine where
 
 import Data.Bits ((.&.))
-import Data.List ((!?))
+import Data.List (uncons, (!?))
 
 import Data.Foldable (foldlM)
 
 import Control.Monad.Identity
 
-data Instr where
-  And :: Instr
-  Add :: Instr
-  Eq :: Instr
-  Dup :: Instr
-  Swap :: Instr
-  Push :: Int -> Instr
-  Pop :: Instr
+data Instr = And | Add | Eq | Dup | Swap | Push Int | Pop
   deriving (Show)
 
-type Cont = [Int]
+{- | list of continuation blocks to execute. Execute the first, and when it returns,
+execute the next. @[]@ returns.
+-}
+data Cont = Uncond [Int] | Cond [Int] [Int]
 
 data Block
   = Block
   { instrs :: [Instr]
-  , onZero :: Cont
-  , onNonZero :: Cont
+  , cont :: Cont
   }
 
 data State
   = State
-  { callStack :: [Cont]
+  { callStack :: [Int]
   , valStack :: [Int]
   }
   deriving (Show)
 
---OUT OF DATE: Jump semantics: At the end of a block, pop the top (head) values from the value stack
--- and the call stack. If the value is zero, jump to the first block
--- in the pair, otherwise jump to the second block. An empty call stack exits.
 exec :: forall m. (Machine m) => [Block] -> [Int] -> m [Int]
 exec code vals = go 0 (State{callStack = [], valStack = vals})
  where
@@ -54,19 +46,18 @@ exec code vals = go 0 (State{callStack = [], valStack = vals})
 execBlock :: (Machine m) => Block -> State -> m (Either (State, Int) [Int])
 execBlock Block{..} s0 = do
   newStack <- evalInstrs instrs (valStack s0)
-  pure $ case newStack of
-    [] -> error "value stack underflow"
-    x : valPopped -> do
-      let j = if x == 0 then onZero else onNonZero
-      case resolveCallStack (j:callStack s0) of
-        Nothing -> Right valPopped
-        Just (callPopped, dest) ->
-          Left (State{valStack = valPopped, callStack = callPopped}, dest)
-
-resolveCallStack :: [Cont] -> Maybe ([Cont], Int)
-resolveCallStack ((dest:cont):stack) = Just (cont : stack, dest)
-resolveCallStack ([]:rest) = resolveCallStack rest
-resolveCallStack [] = Nothing 
+  let (conts, valPopped) =
+        case cont of
+          Uncond t -> (t, newStack)
+          Cond z nz ->
+            case newStack of
+              [] -> error "value stack underflow"
+              (x : rest) -> (if x == 0 then z else nz, rest)
+  pure $
+    case uncons (conts ++ callStack s0) of
+      Nothing -> Right valPopped
+      Just (dest, rest) ->
+        Left (State{valStack = valPopped, callStack = rest}, dest)
 
 evalInstrs :: (Machine m) => [Instr] -> [Int] -> m [Int]
 evalInstrs = flip (foldlM $ flip step)
@@ -108,8 +99,8 @@ instance Machine IO where
     putStrLn $ "Result: " ++ show a
     pure a
 
-twoAddTwo :: [[Instr]]
-twoAddTwo = [[Push 2, Push 2, Add]]
+twoAddTwo :: [Block]
+twoAddTwo = [Block [Push 2, Push 2, Add] (Uncond [])]
 
 {-
 
@@ -122,9 +113,9 @@ Recursive case: F(n) = F(n-1) + F(n-2) for n>1
 
 fib :: [Block]
 fib =
-  [ Block [Dup] [] [1] -- 0
-  , Block [Dup, Push 1, Eq] [2] [] -- 1
-  , Block [Dup, Push (-1), Add, Push 0] [0,3] undefined -- 2
-  , Block [Swap, Push (-2), Add, Push 0]  [0,4] undefined -- 3
-  , Block [Add, Push 0] [] undefined -- 4
+  [ Block [Dup] (Cond [] [1]) -- 0
+  , Block [Dup, Push 1, Eq] (Cond [2] []) -- 1
+  , Block [Dup, Push (-1), Add] (Uncond [0, 3]) -- 2
+  , Block [Swap, Push (-2), Add] (Uncond [0, 4]) -- 3
+  , Block [Add, Push 0] (Uncond []) -- 4
   ]
