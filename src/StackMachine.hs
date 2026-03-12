@@ -1,53 +1,115 @@
 {-# LANGUAGE ImpredicativeTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module StackMachine where
 
-import Data.Bits((.&.))
+import Data.Bits ((.&.))
+import Data.List ((!?))
 
-import Data.Type.Nat
-import Data.Vec.Lazy
+import Data.Foldable (foldlM)
 
-data FreeCat k a b where
-  End :: FreeCat k a a
-  (:*) :: k a b -> FreeCat k b c -> FreeCat k a c
+import Control.Monad.Identity
 
-infixr 5 :*
+data Instr where
+  And :: Instr
+  Add :: Instr
+  Eq :: Instr
+  Dup :: Instr
+  Swap :: Instr
+  Push :: Int -> Instr
+  Pop :: Instr
+  deriving (Show)
 
-(<:>) :: FreeCat k a b -> FreeCat k b c -> FreeCat k a c
-End       <:> ys = ys
-(x :* xs) <:> ys = x :* (xs <:> ys)
+type Cont = [Int]
 
-infixr 5 <:>
+data Block
+  = Block
+  { instrs :: [Instr]
+  , onZero :: Cont
+  , onNonZero :: Cont
+  }
 
-data Instr a b where
-  And    ::                                           Instr ('S ('S n))   ('S n)
-  Add    ::                                           Instr ('S ('S n))   ('S n)
-  Eq     ::                                           Instr ('S ('S n))   ('S n)
-  Dup    ::                                           Instr ('S n)        ('S ('S n))
-  Swap   ::                                           Instr ('S ('S n))   ('S ('S n))
-  Push   :: Int ->                                    Instr n             ('S n)
-  Pop    ::                                           Instr ('S n)        n
-  Branch :: FreeCat Instr a b -> FreeCat Instr a b -> Instr ('S a)        b
+data State
+  = State
+  { callStack :: [Cont]
+  , valStack :: [Int]
+  }
+  deriving (Show)
 
-exec1 :: Instr a b -> Vec a Int -> Vec b Int
-exec1 And      (x ::: y ::: zs)  =                   x .&. y ::: zs
-exec1 Add      (x ::: y ::: zs)  =                     x + y ::: zs
-exec1 Eq       (x ::: y ::: zs)  = (if x == y then 1 else 0) ::: zs
-exec1 Dup      (      n ::: as)  =                   n ::: n ::: as
-exec1 Swap     (x ::: y ::: zs)  =                   y ::: x ::: zs
-exec1 (Push x)              zs   =                         x ::: zs
-exec1 Pop      (      _ ::: zs)  =                               zs
-exec1 (Branch t f) (x ::: zs)
-  | x == 0    = exec t zs
-  | otherwise = exec f zs
+--OUT OF DATE: Jump semantics: At the end of a block, pop the top (head) values from the value stack
+-- and the call stack. If the value is zero, jump to the first block
+-- in the pair, otherwise jump to the second block. An empty call stack exits.
+exec :: forall m. (Machine m) => [Block] -> [Int] -> m [Int]
+exec code vals = go 0 (State{callStack = [], valStack = vals})
+ where
+  go :: Int -> State -> m [Int]
+  go i s = case code !? i of
+    Nothing -> error "reference out of bounds"
+    Just b ->
+      execBlock b s >>= \case
+        Left (s', i') -> go i' s'
+        Right vs -> result vs
 
-exec :: FreeCat Instr a b -> Vec a Int -> Vec b Int
-exec End        zs = zs
-exec (i :* is)  zs = exec is (exec1 i zs)
+execBlock :: (Machine m) => Block -> State -> m (Either (State, Int) [Int])
+execBlock Block{..} s0 = do
+  newStack <- evalInstrs instrs (valStack s0)
+  pure $ case newStack of
+    [] -> error "value stack underflow"
+    x : valPopped -> do
+      let j = if x == 0 then onZero else onNonZero
+      case resolveCallStack (j:callStack s0) of
+        Nothing -> Right valPopped
+        Just (callPopped, dest) ->
+          Left (State{valStack = valPopped, callStack = callPopped}, dest)
 
-twoAddTwo :: Vec ('S 'Z) Int
-twoAddTwo = exec (Add :* End) (2 ::: 2 ::: VNil)
+resolveCallStack :: [Cont] -> Maybe ([Cont], Int)
+resolveCallStack ((dest:cont):stack) = Just (cont : stack, dest)
+resolveCallStack ([]:rest) = resolveCallStack rest
+resolveCallStack [] = Nothing 
+
+evalInstrs :: (Machine m) => [Instr] -> [Int] -> m [Int]
+evalInstrs = flip (foldlM $ flip step)
+
+eval1 :: Instr -> [Int] -> [Int]
+eval1 Add = binOp (+)
+eval1 And = binOp (.&.)
+eval1 Eq = binOp $ \a b -> if a == b then 1 else 0
+eval1 Dup = \case
+  x : rest -> x : x : rest
+  [] -> error "Value stack underflow"
+eval1 Swap = \case
+  (x : y : rest) -> y : x : rest
+  _ -> error "Value stack underflow"
+eval1 (Push x) = (x :)
+eval1 Pop = \case
+  _ : rest -> rest
+  [] -> error "Value stack underflow"
+
+binOp :: (Int -> Int -> Int) -> [Int] -> [Int]
+binOp f (x : y : rest) = f x y : rest
+binOp _ _ = error "Value stack underflow"
+
+class (Monad m) => Machine m where
+  step :: Instr -> [Int] -> m [Int]
+  result :: (Show a) => a -> m a
+
+instance Machine Identity where
+  step i s = pure $ eval1 i s
+  result = pure
+
+instance Machine IO where
+  step i s = do
+    putStrLn $ concat [show s, " ", show i]
+    _ <- getChar
+    pure $ eval1 i s
+
+  result a = do
+    putStrLn $ "Result: " ++ show a
+    pure a
+
+twoAddTwo :: [[Instr]]
+twoAddTwo = [[Push 2, Push 2, Add]]
 
 {-
 
@@ -58,28 +120,11 @@ Recursive case: F(n) = F(n-1) + F(n-2) for n>1
 
 -}
 
-fib :: FreeCat Instr ('S n) ('S n)
-fib =                           -- [n]
-  Dup :*                        -- [n, n]
-  Branch                        -- [n]
-    End -- n == 0              
-    ( Dup :*                    -- [n, n]
-      Push 1 :*                 -- [n, n, 1]
-      Eq :*                     -- [n, n==1]
-      Branch                    -- [n]
-        ( Dup :*                -- [n, n]
-          Push (-1) :*          -- [n, n, -1]
-          Add :*                -- [n, n-1]
-          fib <:>               -- [n, fib(n-1)]
-          Swap :*               -- [fib(n-1), n]
-          Push (-2) :*          -- [fib(n-1), n, -2]                
-          Add :*                -- [fib(n-1), n-2]
-          fib <:>               -- [fib(n-1), fib(n-2)]
-          Add :*                -- [fib(n)]
-          End
-        ) 
-        End :* -- n == 1
-      End
-    )
-  :* End
-
+fib :: [Block]
+fib =
+  [ Block [Dup] [] [1] -- 0
+  , Block [Dup, Push 1, Eq] [2] [] -- 1
+  , Block [Dup, Push (-1), Add, Push 0] [0,3] undefined -- 2
+  , Block [Swap, Push (-2), Add, Push 0]  [0,4] undefined -- 3
+  , Block [Add, Push 0] [] undefined -- 4
+  ]

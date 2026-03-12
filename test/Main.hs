@@ -1,8 +1,11 @@
 module Main (main) where
 
-import Data.Vec.Lazy(Vec(..))
-
 import StackMachine
 
+import Control.Monad.Identity
+
 main :: IO ()
-main = print $ exec fib (6 ::: VNil)
+main = mapM_ (\i -> putStrLn $ concat ["fib ", show i, ": ", show (runIdentity $ exec fib [i])]) [0..10]
+-- main = do
+--   _ <- exec fib [2]
+--   pure ()
