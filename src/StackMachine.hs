@@ -5,11 +5,15 @@
 module StackMachine where
 
 import Data.Bits ((.&.))
-import Data.List (uncons, (!?))
+import Data.List (uncons)
 
 import Data.Foldable (foldlM)
 
-import Control.Monad.Identity
+import Control.Monad.Identity (Identity)
+
+import Data.Fin (Fin, fin0, fin1, fin2, fin3, fin4)
+import Data.Type.Nat (Nat (S), Nat1, Nat5)
+import Data.Vec.Lazy (Vec (..), (!))
 
 data Instr = And | Add | Eq | Dup | Swap | Push Int | Pop
   deriving (Show)
@@ -17,33 +21,34 @@ data Instr = And | Add | Eq | Dup | Swap | Push Int | Pop
 {- | list of continuation blocks to execute. Execute the first, and when it returns,
 execute the next. @[]@ returns.
 -}
-data Cont = Uncond [Int] | Cond [Int] [Int]
+data Cont n = Uncond [Fin n] | Cond [Fin n] [Fin n]
 
-data Block
+data Block n
   = Block
   { instrs :: [Instr]
-  , cont :: Cont
+  , cont :: Cont n
   }
 
-data State
+data State n
   = State
-  { callStack :: [Int]
+  { callStack :: [Fin n]
   , valStack :: [Int]
   }
   deriving (Show)
 
-exec :: forall m. (Machine m) => [Block] -> [Int] -> m [Int]
-exec code vals = go 0 (State{callStack = [], valStack = vals})
- where
-  go :: Int -> State -> m [Int]
-  go i s = case code !? i of
-    Nothing -> error "reference out of bounds"
-    Just b ->
-      execBlock b s >>= \case
-        Left (s', i') -> go i' s'
-        Right vs -> result vs
+type Program n = Vec n (Block n)
 
-execBlock :: (Machine m) => Block -> State -> m (Either (State, Int) [Int])
+exec :: forall m n. (Machine m) => Program (S n) -> [Int] -> m [Int]
+exec code vals = go fin0 (State{callStack = [], valStack = vals})
+ where
+  go :: Fin (S n) -> State (S n) -> m [Int]
+  go i s =
+    execBlock (code ! i) s >>= \case
+      Left (s', i') -> go i' s'
+      Right vs -> result vs
+
+execBlock ::
+  (Machine m) => Block n -> State n -> m (Either (State n, Fin n) [Int])
 execBlock Block{..} s0 = do
   newStack <- evalInstrs instrs (valStack s0)
   let (conts, valPopped) =
@@ -99,8 +104,8 @@ instance Machine IO where
     putStrLn $ "Result: " ++ show a
     pure a
 
-twoAddTwo :: [Block]
-twoAddTwo = [Block [Push 2, Push 2, Add] (Uncond [])]
+twoAddTwo :: Program Nat1
+twoAddTwo = Block [Push 2, Push 2, Add] (Uncond []) ::: VNil
 
 {-
 
@@ -111,11 +116,11 @@ Recursive case: F(n) = F(n-1) + F(n-2) for n>1
 
 -}
 
-fib :: [Block]
+fib :: Program Nat5
 fib =
-  [ Block [Dup] (Cond [] [1]) -- 0
-  , Block [Dup, Push 1, Eq] (Cond [2] []) -- 1
-  , Block [Dup, Push (-1), Add] (Uncond [0, 3]) -- 2
-  , Block [Swap, Push (-2), Add] (Uncond [0, 4]) -- 3
-  , Block [Add, Push 0] (Uncond []) -- 4
-  ]
+  Block [Dup] (Cond [] [fin1]) -- 0
+    ::: Block [Dup, Push 1, Eq] (Cond [fin2] []) -- 1
+    ::: Block [Dup, Push (-1), Add] (Uncond [fin0, fin3]) -- 2
+    ::: Block [Swap, Push (-2), Add] (Uncond [fin0, fin4]) -- 3
+    ::: Block [Add] (Uncond []) -- 4
+    ::: VNil
